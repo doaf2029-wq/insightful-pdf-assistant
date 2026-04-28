@@ -33,16 +33,14 @@ async function setError(jobId: string, message: string) {
   }).eq("id", jobId);
 }
 
-/* -------------------- PDF text extraction with unpdf (Deno-friendly, no canvas) -------------------- */
-async function extractPdfText(pdfBytes: Uint8Array): Promise<{ pageCount: number; pages: { page: number; text: string }[] }> {
-  const { extractText, getDocumentProxy } = await import("npm:unpdf@0.12.1");
-  const pdf = await getDocumentProxy(pdfBytes);
-  const pageCount = pdf.numPages;
-  const { text } = await extractText(pdf, { mergePages: false });
-  // text is string[] when mergePages=false, one entry per page
-  const arr = Array.isArray(text) ? text : [String(text)];
-  const pages = arr.map((t, i) => ({ page: i + 1, text: (t || "").replace(/\s+\n/g, "\n").trim() }));
-  return { pageCount, pages };
+/* -------------------- Base64 encode helper -------------------- */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)));
+  }
+  return btoa(binary);
 }
 
 /* -------------------- Gemini call via Lovable AI -------------------- */
@@ -109,13 +107,22 @@ const SERVICE_SCHEMA = {
   required: ["services"],
 };
 
-async function callGemini(systemPrompt: string, userPrompt: string, model = "google/gemini-2.5-pro") {
+async function callGeminiWithPdf(systemPrompt: string, userPrompt: string, pdfB64: string, model = "google/gemini-2.5-pro") {
   const resp = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
     method: "POST",
     headers: { Authorization: `Bearer ${LOVABLE_API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify({
       model,
-      messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
+      messages: [
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: [
+            { type: "text", text: userPrompt },
+            { type: "file", file: { filename: "document.pdf", file_data: `data:application/pdf;base64,${pdfB64}` } },
+          ],
+        },
+      ],
       tools: [{
         type: "function",
         function: {
@@ -385,24 +392,17 @@ Deno.serve(async (req) => {
     // Respond immediately so the client doesn't block; processing continues
     const work = (async () => {
       try {
-        await setStatus(jobId!, "extracting", 5, "Downloading PDF…");
+        await setStatus(jobId!, "extracting", 10, "Downloading PDF…");
         const { data: pdfBlob, error: dlErr } = await sb.storage.from("uploads").download(job.pdf_path);
         if (dlErr || !pdfBlob) throw new Error("PDF download failed: " + dlErr?.message);
         const pdfBytes = new Uint8Array(await pdfBlob.arrayBuffer());
+        const pdfB64 = bytesToBase64(pdfBytes);
 
-        await setStatus(jobId!, "extracting", 15, "Parsing PDF text…");
-        const { pageCount, pages } = await extractPdfText(pdfBytes);
-        await sb.from("jobs").update({ page_count: pageCount }).eq("id", jobId!);
-        await setStatus(jobId!, "extracting", 30, `Read ${pageCount} pages`);
+        await setStatus(jobId!, "analyzing", 30, "Sending to AI for analysis (may take a few minutes for large PDFs)…");
 
-        // Build a compact prompt with page markers
-        const corpus = pages.map((p) => `<<<PAGE ${p.page}>>>\n${p.text}`).join("\n\n");
-
-        // Trim very large corpora to stay within model context (Gemini 2.5 Pro: ~2M tokens, but cap for cost)
-        const MAX_CHARS = 600_000;
-        const trimmed = corpus.length > MAX_CHARS ? corpus.slice(0, MAX_CHARS) + "\n\n[…document truncated for length…]" : corpus;
-
-        const userInstr = job.prompt ? `User instructions: ${job.prompt}\n\n` : "";
+        const userInstr = job.prompt
+          ? `User instructions: ${job.prompt}\n\nNow analyze the attached PDF.`
+          : "Analyze the attached PDF.";
         const langInstr =
           job.language === "ar" ? "Output Arabic only (leave _en fields empty unless source is English-only)."
           : job.language === "en" ? "Output English only (leave _ar fields empty unless source is Arabic-only)."
@@ -414,18 +414,20 @@ Deno.serve(async (req) => {
           "Each 'service' represents one process a citizen or business can apply for (e.g. 'Issue commercial license', 'Renew passport').",
           "If the document does NOT explicitly list services, divide it by main sections and treat each section as a 'service' with its own subsections.",
           "ALWAYS preserve the EXACT content from the source — do not paraphrase, summarize, or invent. Reorganize, do not rewrite.",
-          "For each step, include the source page number in page_ref so we can attach the original screenshot.",
+          "For each step, include the source page number in page_ref.",
           "Flag explicit notes/warnings/important callouts in the 'notes' array with kind='note' or 'warning'.",
           "Reproduce any tables found in the source verbatim in the 'tables' array (first row = header).",
+          "Set start_page and end_page for each service based on the PDF page numbers.",
           langInstr,
         ].join("\n");
 
-        await setStatus(jobId!, "analyzing", 45, "Identifying services with AI…");
-        const result = await callGemini(sys, userInstr + trimmed);
+        const result = await callGeminiWithPdf(sys, userInstr, pdfB64);
         const services = (result.services ?? []) as any[];
         if (!services.length) throw new Error("AI did not identify any services");
 
-        await sb.from("jobs").update({ service_count: services.length }).eq("id", jobId!);
+        // page_count is best-effort from end_page max
+        const maxPage = services.reduce((m, s) => Math.max(m, s.end_page || 0), 0) || null;
+        await sb.from("jobs").update({ service_count: services.length, page_count: maxPage }).eq("id", jobId!);
         await setStatus(jobId!, "generating", 60, `Generating ${services.length} document(s)…`);
 
         // Generate DOCX per service and zip
