@@ -44,6 +44,90 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+/* -------------------- PDF page rendering & cropping -------------------- */
+type PageImage = { png: Uint8Array; width: number; height: number };
+
+async function renderAndCropPages(
+  pdfBytes: Uint8Array,
+  pageNumbers: number[],
+): Promise<Map<number, PageImage>> {
+  const out = new Map<number, PageImage>();
+  if (!pageNumbers.length) return out;
+  const unique = Array.from(new Set(pageNumbers.filter((p) => p && p > 0)));
+  let pdf: any;
+  try {
+    pdf = await getDocumentProxy(new Uint8Array(pdfBytes));
+  } catch (e) {
+    console.error("PDF render init failed:", e);
+    return out;
+  }
+  const totalPages = pdf.numPages;
+  for (const p of unique) {
+    if (p > totalPages) continue;
+    try {
+      const result: any = await renderPageAsImage(new Uint8Array(pdfBytes), p, {
+        canvas: () => import("npm:@napi-rs/canvas@0.1.53"),
+        scale: 1.5,
+      });
+      // result is an ArrayBuffer of PNG bytes; width/height not always returned.
+      const buf = result instanceof Uint8Array ? result : new Uint8Array(result);
+      // Extract dimensions from PNG IHDR (bytes 16-23)
+      const w = (buf[16] << 24) | (buf[17] << 16) | (buf[18] << 8) | buf[19];
+      const h = (buf[20] << 24) | (buf[21] << 16) | (buf[22] << 8) | buf[23];
+      out.set(p, { png: buf, width: w, height: h });
+    } catch (e) {
+      console.warn(`Render failed for page ${p}:`, (e as any)?.message);
+    }
+  }
+  return out;
+}
+
+async function cropPng(
+  png: Uint8Array,
+  origW: number,
+  origH: number,
+  bbox?: { x: number; y: number; w: number; h: number },
+): Promise<{ data: Uint8Array; width: number; height: number }> {
+  if (!bbox || bbox.w <= 0 || bbox.h <= 0) {
+    return { data: png, width: origW, height: origH };
+  }
+  try {
+    const { Image } = await import("https://deno.land/x/imagescript@1.2.17/mod.ts");
+    const img = await Image.decode(png);
+    // Pad bbox slightly (3%) so we don't clip edges
+    const pad = 0.02;
+    const x = Math.max(0, Math.floor((bbox.x - pad) * img.width));
+    const y = Math.max(0, Math.floor((bbox.y - pad) * img.height));
+    const w = Math.min(img.width - x, Math.ceil((bbox.w + 2 * pad) * img.width));
+    const h = Math.min(img.height - y, Math.ceil((bbox.h + 2 * pad) * img.height));
+    if (w < 20 || h < 20) return { data: png, width: img.width, height: img.height };
+    const cropped = img.crop(x, y, w, h);
+    const encoded = await cropped.encode();
+    return { data: encoded, width: cropped.width, height: cropped.height };
+  } catch (e) {
+    console.warn("Crop failed, using full page:", (e as any)?.message);
+    return { data: png, width: origW, height: origH };
+  }
+}
+
+function imageParagraph(data: Uint8Array, srcW: number, srcH: number, maxWidthPx = 480): Paragraph {
+  const ratio = srcH / Math.max(srcW, 1);
+  const width = Math.min(maxWidthPx, srcW);
+  const height = Math.round(width * ratio);
+  return new Paragraph({
+    alignment: AlignmentType.CENTER,
+    spacing: { before: 80, after: 160 },
+    children: [
+      new ImageRun({
+        type: "png",
+        data,
+        transformation: { width, height },
+        altText: { title: "Step image", description: "Extracted from source PDF", name: "step" },
+      } as any),
+    ],
+  });
+}
+
 /* -------------------- Gemini call via Lovable AI -------------------- */
 const SERVICE_SCHEMA = {
   type: "object",
