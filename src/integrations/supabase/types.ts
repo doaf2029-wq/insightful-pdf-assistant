@@ -14,7 +14,122 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      jobs: {
+        Row: {
+          created_at: string
+          error_message: string | null
+          filename: string
+          id: string
+          language: string
+          page_count: number | null
+          pdf_path: string
+          progress: number
+          prompt: string | null
+          service_count: number | null
+          status: Database["public"]["Enums"]["job_status"]
+          status_message: string | null
+          updated_at: string
+          user_id: string
+          zip_path: string | null
+        }
+        Insert: {
+          created_at?: string
+          error_message?: string | null
+          filename: string
+          id?: string
+          language?: string
+          page_count?: number | null
+          pdf_path: string
+          progress?: number
+          prompt?: string | null
+          service_count?: number | null
+          status?: Database["public"]["Enums"]["job_status"]
+          status_message?: string | null
+          updated_at?: string
+          user_id: string
+          zip_path?: string | null
+        }
+        Update: {
+          created_at?: string
+          error_message?: string | null
+          filename?: string
+          id?: string
+          language?: string
+          page_count?: number | null
+          pdf_path?: string
+          progress?: number
+          prompt?: string | null
+          service_count?: number | null
+          status?: Database["public"]["Enums"]["job_status"]
+          status_message?: string | null
+          updated_at?: string
+          user_id?: string
+          zip_path?: string | null
+        }
+        Relationships: []
+      }
+      profiles: {
+        Row: {
+          created_at: string
+          display_name: string | null
+          id: string
+        }
+        Insert: {
+          created_at?: string
+          display_name?: string | null
+          id: string
+        }
+        Update: {
+          created_at?: string
+          display_name?: string | null
+          id?: string
+        }
+        Relationships: []
+      }
+      service_outputs: {
+        Row: {
+          created_at: string
+          docx_path: string
+          id: string
+          job_id: string
+          language: string | null
+          order_index: number
+          title: string
+          title_ar: string | null
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          docx_path: string
+          id?: string
+          job_id: string
+          language?: string | null
+          order_index?: number
+          title: string
+          title_ar?: string | null
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          docx_path?: string
+          id?: string
+          job_id?: string
+          language?: string | null
+          order_index?: number
+          title?: string
+          title_ar?: string | null
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "service_outputs_job_id_fkey"
+            columns: ["job_id"]
+            isOneToOne: false
+            referencedRelation: "jobs"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
     }
     Views: {
       [_ in never]: never
@@ -23,7 +138,14 @@ export type Database = {
       [_ in never]: never
     }
     Enums: {
-      [_ in never]: never
+      job_status:
+        | "pending"
+        | "uploading"
+        | "extracting"
+        | "analyzing"
+        | "generating"
+        | "completed"
+        | "failed"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -150,6 +272,16 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      job_status: [
+        "pending",
+        "uploading",
+        "extracting",
+        "analyzing",
+        "generating",
+        "completed",
+        "failed",
+      ],
+    },
   },
 } as const
