@@ -360,7 +360,11 @@ function makeTable(rows: string[][], rtl = false): Table {
   });
 }
 
-function buildServiceDoc(svc: any, language: "en" | "ar" | "bilingual" | "auto"): Document {
+async function buildServiceDoc(
+  svc: any,
+  language: "en" | "ar" | "bilingual" | "auto",
+  pageImages: Map<number, PageImage>,
+): Promise<Document> {
   const wantEn = language === "en" || language === "auto" || language === "bilingual";
   const wantAr = (language === "ar" || language === "bilingual" || language === "auto") && (svc.title_ar || svc.overview_ar);
 
@@ -421,7 +425,8 @@ function buildServiceDoc(svc: any, language: "en" | "ar" | "bilingual" | "auto")
   // Application steps
   if (svc.steps?.length) {
     if (wantEn) children.push(heading("Application Steps", 2, false));
-    svc.steps.forEach((s: any, i: number) => {
+    for (let i = 0; i < svc.steps.length; i++) {
+      const s = svc.steps[i];
       if (wantEn) {
         children.push(new Paragraph({
           numbering: { reference: "steps", level: 0 },
@@ -437,7 +442,13 @@ function buildServiceDoc(svc: any, language: "en" | "ar" | "bilingual" | "auto")
           children: [makeRun(`${i + 1}. ${s.step_ar}`, { italic: true, size: 22, rtl: true })],
         }));
       }
-    });
+      // Embed step image (cropped from referenced page)
+      const pageImg = s.page_ref ? pageImages.get(s.page_ref) : undefined;
+      if (pageImg) {
+        const { data, width, height } = await cropPng(pageImg.png, pageImg.width, pageImg.height, s.bbox);
+        children.push(imageParagraph(data, width, height));
+      }
+    }
   }
 
   // Notes & warnings
@@ -460,6 +471,22 @@ function buildServiceDoc(svc: any, language: "en" | "ar" | "bilingual" | "auto")
       if (t.caption) children.push(para(t.caption, { italic: true }));
       if (t.rows?.length) children.push(makeTable(t.rows));
       children.push(new Paragraph({ children: [makeRun("", {})] }));
+    }
+  }
+
+  // Important figures (non-step)
+  if (svc.important_figures?.length) {
+    const figs = svc.important_figures.filter((f: any) => f && f.page_ref);
+    if (figs.length) {
+      if (wantEn) children.push(heading("Figures", 2, false));
+      for (const f of figs) {
+        const pageImg = pageImages.get(f.page_ref);
+        if (!pageImg) continue;
+        const { data, width, height } = await cropPng(pageImg.png, pageImg.width, pageImg.height, f.bbox);
+        children.push(imageParagraph(data, width, height));
+        if (wantEn && f.caption_en) children.push(para(f.caption_en, { italic: true }));
+        if (wantAr && f.caption_ar) children.push(para(f.caption_ar, { italic: true, rtl: true }));
+      }
     }
   }
 
