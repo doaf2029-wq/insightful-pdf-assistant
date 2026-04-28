@@ -6,6 +6,7 @@ import {
   ImageRun, PageOrientation, LevelFormat, Footer, PageNumber,
 } from "npm:docx@8.5.0";
 import JSZip from "npm:jszip@3.10.1";
+import { getDocumentProxy, renderPageAsImage } from "npm:unpdf@0.12.1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -43,6 +44,90 @@ function bytesToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+/* -------------------- PDF page rendering & cropping -------------------- */
+type PageImage = { png: Uint8Array; width: number; height: number };
+
+async function renderAndCropPages(
+  pdfBytes: Uint8Array,
+  pageNumbers: number[],
+): Promise<Map<number, PageImage>> {
+  const out = new Map<number, PageImage>();
+  if (!pageNumbers.length) return out;
+  const unique = Array.from(new Set(pageNumbers.filter((p) => p && p > 0)));
+  let pdf: any;
+  try {
+    pdf = await getDocumentProxy(new Uint8Array(pdfBytes));
+  } catch (e) {
+    console.error("PDF render init failed:", e);
+    return out;
+  }
+  const totalPages = pdf.numPages;
+  for (const p of unique) {
+    if (p > totalPages) continue;
+    try {
+      const result: any = await renderPageAsImage(new Uint8Array(pdfBytes), p, {
+        canvas: () => import("npm:@napi-rs/canvas@0.1.53"),
+        scale: 1.5,
+      });
+      // result is an ArrayBuffer of PNG bytes; width/height not always returned.
+      const buf = result instanceof Uint8Array ? result : new Uint8Array(result);
+      // Extract dimensions from PNG IHDR (bytes 16-23)
+      const w = (buf[16] << 24) | (buf[17] << 16) | (buf[18] << 8) | buf[19];
+      const h = (buf[20] << 24) | (buf[21] << 16) | (buf[22] << 8) | buf[23];
+      out.set(p, { png: buf, width: w, height: h });
+    } catch (e) {
+      console.warn(`Render failed for page ${p}:`, (e as any)?.message);
+    }
+  }
+  return out;
+}
+
+async function cropPng(
+  png: Uint8Array,
+  origW: number,
+  origH: number,
+  bbox?: { x: number; y: number; w: number; h: number },
+): Promise<{ data: Uint8Array; width: number; height: number }> {
+  if (!bbox || bbox.w <= 0 || bbox.h <= 0) {
+    return { data: png, width: origW, height: origH };
+  }
+  try {
+    const { Image } = await import("https://deno.land/x/imagescript@1.2.17/mod.ts");
+    const img = await Image.decode(png);
+    // Pad bbox slightly (3%) so we don't clip edges
+    const pad = 0.02;
+    const x = Math.max(0, Math.floor((bbox.x - pad) * img.width));
+    const y = Math.max(0, Math.floor((bbox.y - pad) * img.height));
+    const w = Math.min(img.width - x, Math.ceil((bbox.w + 2 * pad) * img.width));
+    const h = Math.min(img.height - y, Math.ceil((bbox.h + 2 * pad) * img.height));
+    if (w < 20 || h < 20) return { data: png, width: img.width, height: img.height };
+    const cropped = img.crop(x, y, w, h);
+    const encoded = await cropped.encode();
+    return { data: encoded, width: cropped.width, height: cropped.height };
+  } catch (e) {
+    console.warn("Crop failed, using full page:", (e as any)?.message);
+    return { data: png, width: origW, height: origH };
+  }
+}
+
+function imageParagraph(data: Uint8Array, srcW: number, srcH: number, maxWidthPx = 480): Paragraph {
+  const ratio = srcH / Math.max(srcW, 1);
+  const width = Math.min(maxWidthPx, srcW);
+  const height = Math.round(width * ratio);
+  return new Paragraph({
+    alignment: AlignmentType.CENTER,
+    spacing: { before: 80, after: 160 },
+    children: [
+      new ImageRun({
+        type: "png",
+        data,
+        transformation: { width, height },
+        altText: { title: "Step image", description: "Extracted from source PDF", name: "step" },
+      } as any),
+    ],
+  });
+}
+
 /* -------------------- Gemini call via Lovable AI -------------------- */
 const SERVICE_SCHEMA = {
   type: "object",
@@ -72,6 +157,16 @@ const SERVICE_SCHEMA = {
                 step_en: { type: "string" },
                 step_ar: { type: "string" },
                 page_ref: { type: "integer", description: "Source page number for this step's image" },
+                bbox: {
+                  type: "object",
+                  description: "Optional normalized bounding box (0-1) of the step's screenshot/diagram on page_ref. x,y is top-left.",
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    w: { type: "number" },
+                    h: { type: "number" },
+                  },
+                },
               },
               required: ["step_en"],
             },
@@ -97,6 +192,26 @@ const SERVICE_SCHEMA = {
                 rows: { type: "array", items: { type: "array", items: { type: "string" } } },
               },
               required: ["rows"],
+            },
+          },
+          important_figures: {
+            type: "array",
+            description: "Important non-step figures (diagrams, charts, official seals, screenshots) worth embedding. Skip decorative or logo-only images.",
+            items: {
+              type: "object",
+              properties: {
+                page_ref: { type: "integer" },
+                caption_en: { type: "string" },
+                caption_ar: { type: "string" },
+                bbox: {
+                  type: "object",
+                  properties: {
+                    x: { type: "number" }, y: { type: "number" },
+                    w: { type: "number" }, h: { type: "number" },
+                  },
+                },
+              },
+              required: ["page_ref"],
             },
           },
         },
@@ -245,7 +360,11 @@ function makeTable(rows: string[][], rtl = false): Table {
   });
 }
 
-function buildServiceDoc(svc: any, language: "en" | "ar" | "bilingual" | "auto"): Document {
+async function buildServiceDoc(
+  svc: any,
+  language: "en" | "ar" | "bilingual" | "auto",
+  pageImages: Map<number, PageImage>,
+): Promise<Document> {
   const wantEn = language === "en" || language === "auto" || language === "bilingual";
   const wantAr = (language === "ar" || language === "bilingual" || language === "auto") && (svc.title_ar || svc.overview_ar);
 
@@ -306,7 +425,8 @@ function buildServiceDoc(svc: any, language: "en" | "ar" | "bilingual" | "auto")
   // Application steps
   if (svc.steps?.length) {
     if (wantEn) children.push(heading("Application Steps", 2, false));
-    svc.steps.forEach((s: any, i: number) => {
+    for (let i = 0; i < svc.steps.length; i++) {
+      const s = svc.steps[i];
       if (wantEn) {
         children.push(new Paragraph({
           numbering: { reference: "steps", level: 0 },
@@ -322,7 +442,13 @@ function buildServiceDoc(svc: any, language: "en" | "ar" | "bilingual" | "auto")
           children: [makeRun(`${i + 1}. ${s.step_ar}`, { italic: true, size: 22, rtl: true })],
         }));
       }
-    });
+      // Embed step image (cropped from referenced page)
+      const pageImg = s.page_ref ? pageImages.get(s.page_ref) : undefined;
+      if (pageImg) {
+        const { data, width, height } = await cropPng(pageImg.png, pageImg.width, pageImg.height, s.bbox);
+        children.push(imageParagraph(data, width, height));
+      }
+    }
   }
 
   // Notes & warnings
@@ -345,6 +471,22 @@ function buildServiceDoc(svc: any, language: "en" | "ar" | "bilingual" | "auto")
       if (t.caption) children.push(para(t.caption, { italic: true }));
       if (t.rows?.length) children.push(makeTable(t.rows));
       children.push(new Paragraph({ children: [makeRun("", {})] }));
+    }
+  }
+
+  // Important figures (non-step)
+  if (svc.important_figures?.length) {
+    const figs = svc.important_figures.filter((f: any) => f && f.page_ref);
+    if (figs.length) {
+      if (wantEn) children.push(heading("Figures", 2, false));
+      for (const f of figs) {
+        const pageImg = pageImages.get(f.page_ref);
+        if (!pageImg) continue;
+        const { data, width, height } = await cropPng(pageImg.png, pageImg.width, pageImg.height, f.bbox);
+        children.push(imageParagraph(data, width, height));
+        if (wantEn && f.caption_en) children.push(para(f.caption_en, { italic: true }));
+        if (wantAr && f.caption_ar) children.push(para(f.caption_ar, { italic: true, rtl: true }));
+      }
     }
   }
 
@@ -414,7 +556,8 @@ Deno.serve(async (req) => {
           "Each 'service' represents one process a citizen or business can apply for (e.g. 'Issue commercial license', 'Renew passport').",
           "If the document does NOT explicitly list services, divide it by main sections and treat each section as a 'service' with its own subsections.",
           "ALWAYS preserve the EXACT content from the source — do not paraphrase, summarize, or invent. Reorganize, do not rewrite.",
-          "For each step, include the source page number in page_ref.",
+          "For each step that has a screenshot, diagram, or visual on the page, set page_ref to that page number AND fill bbox with the normalized rectangle (x,y,w,h all between 0 and 1, where 0,0 is the top-left of the page) tightly around the image area for that step. If a step has no visual, set page_ref to the page where the step text appears and omit bbox.",
+          "Populate important_figures with non-step images that meaningfully aid understanding (workflow diagrams, charts, official forms, screenshots). Skip logos, decorative borders, and headers. Always include page_ref and bbox.",
           "Flag explicit notes/warnings/important callouts in the 'notes' array with kind='note' or 'warning'.",
           "Reproduce any tables found in the source verbatim in the 'tables' array (first row = header).",
           "Set start_page and end_page for each service based on the PDF page numbers.",
@@ -428,6 +571,17 @@ Deno.serve(async (req) => {
         // page_count is best-effort from end_page max
         const maxPage = services.reduce((m, s) => Math.max(m, s.end_page || 0), 0) || null;
         await sb.from("jobs").update({ service_count: services.length, page_count: maxPage }).eq("id", jobId!);
+        await setStatus(jobId!, "generating", 50, `Rendering page images…`);
+
+        // Collect every page referenced by any step / figure across all services
+        const allPages: number[] = [];
+        for (const svc of services) {
+          for (const s of (svc.steps ?? [])) if (s.page_ref) allPages.push(s.page_ref);
+          for (const f of (svc.important_figures ?? [])) if (f.page_ref) allPages.push(f.page_ref);
+        }
+        const pageImages = await renderAndCropPages(pdfBytes, allPages);
+        console.log(`Rendered ${pageImages.size} pages out of ${new Set(allPages).size} requested`);
+
         await setStatus(jobId!, "generating", 60, `Generating ${services.length} document(s)…`);
 
         // Generate DOCX per service and zip
@@ -436,7 +590,7 @@ Deno.serve(async (req) => {
 
         for (let i = 0; i < services.length; i++) {
           const svc = services[i];
-          const doc = buildServiceDoc(svc, job.language);
+          const doc = await buildServiceDoc(svc, job.language, pageImages);
           const buf = await Packer.toBuffer(doc);
           const baseName = `${String(i + 1).padStart(2, "0")}_${sanitize(svc.title_en || "service")}`;
           const docxName = `${baseName}.docx`;
