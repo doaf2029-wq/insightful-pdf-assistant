@@ -6,6 +6,7 @@ import {
   ImageRun, PageOrientation, LevelFormat, Footer, PageNumber,
 } from "npm:docx@8.5.0";
 import JSZip from "npm:jszip@3.10.1";
+import { getDocumentProxy, renderPageAsImage } from "npm:unpdf@0.12.1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -72,6 +73,16 @@ const SERVICE_SCHEMA = {
                 step_en: { type: "string" },
                 step_ar: { type: "string" },
                 page_ref: { type: "integer", description: "Source page number for this step's image" },
+                bbox: {
+                  type: "object",
+                  description: "Optional normalized bounding box (0-1) of the step's screenshot/diagram on page_ref. x,y is top-left.",
+                  properties: {
+                    x: { type: "number" },
+                    y: { type: "number" },
+                    w: { type: "number" },
+                    h: { type: "number" },
+                  },
+                },
               },
               required: ["step_en"],
             },
@@ -97,6 +108,26 @@ const SERVICE_SCHEMA = {
                 rows: { type: "array", items: { type: "array", items: { type: "string" } } },
               },
               required: ["rows"],
+            },
+          },
+          important_figures: {
+            type: "array",
+            description: "Important non-step figures (diagrams, charts, official seals, screenshots) worth embedding. Skip decorative or logo-only images.",
+            items: {
+              type: "object",
+              properties: {
+                page_ref: { type: "integer" },
+                caption_en: { type: "string" },
+                caption_ar: { type: "string" },
+                bbox: {
+                  type: "object",
+                  properties: {
+                    x: { type: "number" }, y: { type: "number" },
+                    w: { type: "number" }, h: { type: "number" },
+                  },
+                },
+              },
+              required: ["page_ref"],
             },
           },
         },
