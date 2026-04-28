@@ -4,7 +4,7 @@ export type Lang = "en" | "ar";
 
 export const translations = {
   en: {
-    appName: "Khidma",
+    appName: "Clarivo",
     tagline: "PDF to Service Documents",
     description: "Upload a PDF and get a polished DOCX for every service it describes — overview, eligibility, documents, fees, steps. Bilingual EN/AR.",
     signIn: "Sign in",
@@ -69,7 +69,7 @@ export const translations = {
     retry: "Retry",
   },
   ar: {
-    appName: "خدمة",
+    appName: "كلاريفو",
     tagline: "تحويل ملفات PDF إلى مستندات خدمات",
     description: "ارفع ملف PDF واحصل على مستند DOCX منسق لكل خدمة — نظرة عامة، شروط الأهلية، المستندات، الرسوم، خطوات التقديم. عربي/إنجليزي.",
     signIn: "تسجيل الدخول",

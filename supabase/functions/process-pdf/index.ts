@@ -349,7 +349,7 @@ function buildServiceDoc(svc: any, language: "en" | "ar" | "bilingual" | "auto")
   }
 
   return new Document({
-    creator: "Khidma",
+    creator: "Clarivo",
     title: svc.title_en,
     styles: {
       default: { document: { run: { font: "Arial", size: 22 } } },

@@ -68,8 +68,15 @@ const JobDetail = () => {
       .on("postgres_changes", { event: "INSERT", schema: "public", table: "service_outputs", filter: `job_id=eq.${id}` }, () => loadOutputs())
       .subscribe();
 
+    // Polling fallback in case realtime is delayed/blocked (iframe, network, etc.)
+    const poll = setInterval(() => {
+      loadJob();
+      loadOutputs();
+    }, 3000);
+
     return () => {
       active = false;
+      clearInterval(poll);
       supabase.removeChannel(ch);
     };
   }, [id, user, t]);
