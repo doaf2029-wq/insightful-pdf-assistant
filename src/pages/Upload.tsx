@@ -12,7 +12,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Card } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { requestNotificationPermission } from "@/lib/notifications";
+import { requestNotificationPermission, notificationsSupported, notificationsBlocked } from "@/lib/notifications";
 
 const UploadPage = () => {
   const { t, lang } = useT();
@@ -132,9 +132,18 @@ const UploadPage = () => {
               size="sm"
               className="gap-1.5"
               onClick={async () => {
+                if (!notificationsSupported()) {
+                  toast.info("Your browser doesn't support notifications. We'll use in-app alerts.");
+                  return;
+                }
+                if (notificationsBlocked()) {
+                  toast.error("Notifications are blocked. Enable them in your browser settings or open this app in a new tab.");
+                  return;
+                }
                 const ok = await requestNotificationPermission();
                 setNotifyEnabled(ok);
                 if (ok) toast.success(t("notificationsEnabled"));
+                else toast.info("Notifications not enabled. You'll still see in-app updates.");
               }}
               disabled={notifyEnabled}
             >
