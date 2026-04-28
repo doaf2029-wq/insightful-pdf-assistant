@@ -33,33 +33,15 @@ async function setError(jobId: string, message: string) {
   }).eq("id", jobId);
 }
 
-/* -------------------- PDF text extraction with pdf.js -------------------- */
+/* -------------------- PDF text extraction with unpdf (Deno-friendly, no canvas) -------------------- */
 async function extractPdfText(pdfBytes: Uint8Array): Promise<{ pageCount: number; pages: { page: number; text: string }[] }> {
-  // Use pdfjs legacy build for Node/Deno (no DOM)
-  const pdfjs: any = await import("https://esm.sh/pdfjs-dist@4.0.379/legacy/build/pdf.mjs");
-  // Disable worker
-  pdfjs.GlobalWorkerOptions.workerSrc = "";
-  const loadingTask = pdfjs.getDocument({ data: pdfBytes, useSystemFonts: true, disableFontFace: true, isEvalSupported: false });
-  const doc = await loadingTask.promise;
-  const pageCount: number = doc.numPages;
-  const pages: { page: number; text: string }[] = [];
-  for (let i = 1; i <= pageCount; i++) {
-    const page = await doc.getPage(i);
-    const content = await page.getTextContent();
-    // Reconstruct lines by Y coordinate
-    const items: any[] = content.items as any[];
-    const lines = new Map<number, string[]>();
-    for (const it of items) {
-      const y = Math.round(it.transform[5]);
-      const arr = lines.get(y) ?? [];
-      arr.push(it.str);
-      lines.set(y, arr);
-    }
-    const sortedY = Array.from(lines.keys()).sort((a, b) => b - a);
-    const text = sortedY.map((y) => lines.get(y)!.join(" ").replace(/\s+/g, " ").trim()).filter(Boolean).join("\n");
-    pages.push({ page: i, text });
-    page.cleanup?.();
-  }
+  const { extractText, getDocumentProxy } = await import("npm:unpdf@0.12.1");
+  const pdf = await getDocumentProxy(pdfBytes);
+  const pageCount = pdf.numPages;
+  const { text } = await extractText(pdf, { mergePages: false });
+  // text is string[] when mergePages=false, one entry per page
+  const arr = Array.isArray(text) ? text : [String(text)];
+  const pages = arr.map((t, i) => ({ page: i + 1, text: (t || "").replace(/\s+\n/g, "\n").trim() }));
   return { pageCount, pages };
 }
 
