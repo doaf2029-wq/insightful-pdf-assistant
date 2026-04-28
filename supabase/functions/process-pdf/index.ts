@@ -570,6 +570,17 @@ Deno.serve(async (req) => {
         // page_count is best-effort from end_page max
         const maxPage = services.reduce((m, s) => Math.max(m, s.end_page || 0), 0) || null;
         await sb.from("jobs").update({ service_count: services.length, page_count: maxPage }).eq("id", jobId!);
+        await setStatus(jobId!, "generating", 50, `Rendering page images…`);
+
+        // Collect every page referenced by any step / figure across all services
+        const allPages: number[] = [];
+        for (const svc of services) {
+          for (const s of (svc.steps ?? [])) if (s.page_ref) allPages.push(s.page_ref);
+          for (const f of (svc.important_figures ?? [])) if (f.page_ref) allPages.push(f.page_ref);
+        }
+        const pageImages = await renderAndCropPages(pdfBytes, allPages);
+        console.log(`Rendered ${pageImages.size} pages out of ${new Set(allPages).size} requested`);
+
         await setStatus(jobId!, "generating", 60, `Generating ${services.length} document(s)…`);
 
         // Generate DOCX per service and zip
@@ -578,7 +589,7 @@ Deno.serve(async (req) => {
 
         for (let i = 0; i < services.length; i++) {
           const svc = services[i];
-          const doc = buildServiceDoc(svc, job.language);
+          const doc = await buildServiceDoc(svc, job.language, pageImages);
           const buf = await Packer.toBuffer(doc);
           const baseName = `${String(i + 1).padStart(2, "0")}_${sanitize(svc.title_en || "service")}`;
           const docxName = `${baseName}.docx`;
