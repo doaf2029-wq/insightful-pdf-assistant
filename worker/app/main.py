@@ -378,7 +378,7 @@ Return ONLY valid JSON. Schema:
 }}
 
 DOCUMENT TEXT:
-{text}""”
+{text}""'
 
 
 # ── Docx assembly ─────────────────────────────────────────────────────────────
