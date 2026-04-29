@@ -279,17 +279,17 @@ async function callGeminiWithPdf(
   const models = [primaryModel, "google/gemini-2.5-flash"];
   let lastErr: any;
   for (const model of models) {
-    for (let attempt = 0; attempt < 4; attempt++) {
+    // 6 attempts per model: ~2s, 4s, 9s, 18s, 30s, 30s (max) -> ~93s worst-case per model
+    for (let attempt = 0; attempt < 6; attempt++) {
       try {
         return await callGeminiOnce(systemPrompt, userPrompt, pdfB64, model);
       } catch (e: any) {
         lastErr = e;
         const status = e?.status ?? 0;
-        const transient = status === 503 || status === 502 || status === 504 || status === 429 || status === 500;
+        const transient = status === 503 || status === 502 || status === 504 || status === 429 || status === 500 || status === 0;
         console.warn(`Gemini call failed (model=${model}, attempt=${attempt + 1}, status=${status}): ${e?.message?.slice(0, 200)}`);
         if (!transient) break; // non-retriable on this model -> try fallback model
-        // Exponential backoff with jitter: 2s, 5s, 12s, 25s
-        const wait = Math.min(25000, 2000 * Math.pow(2.2, attempt)) + Math.floor(Math.random() * 1000);
+        const wait = Math.min(30000, 2000 * Math.pow(2, attempt)) + Math.floor(Math.random() * 1500);
         await sleep(wait);
       }
     }
