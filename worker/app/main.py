@@ -296,119 +296,90 @@ LABEL_MAP = {
     "نبذة": "Service Overview",
 }
 
-EXTRACTION_PROMPT = """You are extracting structured content from a legal government document to populate a Word document.
+EXTRACTION_PROMPT = """You are extracting COMPLETE, VERBATIM content from a legal government document.
+This content will be used at an information desk — every detail matters. DO NOT summarize. DO NOT paraphrase. Extract everything word for word.
 
 Component: {name}
 Type: {comp_type}
 Pages: {start} to {end}
 
-EXTRACTION RULES:
-1. Extract content for these sections IN ORDER (for services):
-   - Service Overview
-   - Eligibility Criteria (with named subsections)
-   - Fees
-   - Required Documents
-   - Application Steps (numbered steps with all bullets)
-   - How to Follow Up (only if present)
-   - Application Notifications and Statuses (only if present)
+CRITICAL RULES:
+1. NEVER summarize. Copy text exactly as written.
+2. Extract EVERY numbered step, EVERY sub-step, EVERY bullet point completely.
+3. Extract EVERY condition, EVERY exception, EVERY note and warning verbatim.
+4. If a step has sub-steps, extract all of them individually numbered.
+5. If there are examples in the document, extract them fully.
+6. Tables must be extracted with ALL rows and ALL columns completely.
+7. Do not skip any paragraph, condition, or instruction no matter how minor.
+8. Arabic text must be extracted in Arabic exactly as written.
+9. Warnings (⚠️) and notes (📌) must be extracted verbatim including all their content.
+10. For application steps: each step must have its COMPLETE description, ALL its bullets, ALL conditions, ALL sub-conditions.
 
-2. For non-service components: identify natural subsections semantically.
+For non-service components (guides, policies, methodologies):
+- Identify every distinct section and subsection
+- Extract the COMPLETE content of each — not a summary, the full text
+- Every numbered item, every bullet, every table row must appear in output
+- Include all examples, all definitions, all conditions
 
-3. For each Application Step extract:
-   - step_number, title, all bullets exactly
-   - branches (Yes/No paths) with their own bullets
-   - notes (📌), warnings (⚠️)
-   - image_ids: list page numbers where images appear in this step
-
-4. Tables: reproduce as {{"headers": [...], "rows": [[...]]}}
-
-5. TEXT FIDELITY: extract verbatim. Mark bold as **text**, italic as _text_, bold+italic as ***text***
-
-6. LANGUAGE: if Arabic extract in Arabic, mark "rtl": true. If bilingual extract both.
-
-7. If a section has no content return null for that section.
-
-8. Return ONLY valid JSON. Schema:
+Return ONLY valid JSON. Schema:
 {{
   "component_name": "...",
   "component_type": "...",
   "is_service": true/false,
   "language": "en"|"ar"|"bilingual",
   "sections": {{
-    "service_overview": {{"text": "...", "rtl": false}},
+    "service_overview": {{"text": "FULL verbatim text here", "rtl": false}},
     "eligibility_criteria": {{
       "subsections": [
-        {{"title": "...", "bullets": ["..."], "warnings": ["..."], "rtl": false}}
+        {{"title": "...", "bullets": ["complete bullet 1", "complete bullet 2"], "warnings": ["complete warning text"], "rtl": false}}
       ]
     }},
     "fees": {{"text": "..."}},
     "required_documents": [
-      {{"name": "...", "description": "...", "conditional": false}}
+      {{"name": "exact document name", "description": "exact description", "conditional": false}}
     ],
     "application_steps": [
       {{
         "step_number": 1,
-        "title": "...",
-        "bullets": ["..."],
+        "title": "exact step title",
+        "bullets": ["complete instruction 1", "complete instruction 2"],
         "branches": [
-          {{"label": "...", "bullets": ["..."], "image_pages": [N]}}
+          {{"label": "exact branch label e.g. If Yes", "bullets": ["complete bullet"], "image_pages": [N]}}
         ],
         "image_pages": [N],
-        "notes": ["..."],
-        "warnings": ["..."],
+        "notes": ["complete note text"],
+        "warnings": ["complete warning text"],
         "rtl": false
       }}
     ],
-    "follow_up": {{"text": "...", "image_pages": [N]}},
+    "follow_up": {{"text": "complete verbatim text", "image_pages": [N]}},
     "notifications_statuses": {{
       "tables": [
-        {{"table_title": "...", "headers": ["..."], "rows": [["..."]]}}
+        {{"table_title": "...", "headers": ["col1", "col2"], "rows": [["row1col1", "row1col2"]]}}
       ]
     }},
     "free_sections": [
-      {{"title": "...", "content": "...", "rtl": false}}
+      {{
+        "title": "exact section title",
+        "content": "COMPLETE verbatim content — every word, every bullet, every sub-point, every example, every condition",
+        "subsections": [
+          {{"title": "exact subsection title", "content": "complete verbatim content"}}
+        ],
+        "tables": [
+          {{"table_title": "...", "headers": ["..."], "rows": [["..."]]}}
+        ],
+        "warnings": ["complete warning text"],
+        "notes": ["complete note text"],
+        "rtl": false
+      }}
     ]
   }},
   "label_mappings": [{{"source": "...", "mapped_to": "..."}}]
 }}
 
 DOCUMENT TEXT:
-{text}"""
+{text}""”
 
-def extract_component(comp: dict, chunks: list) -> dict:
-    start_p = comp.get("start_page", 1)
-    end_p = comp.get("end_page", chunks[-1]["end"] if chunks else 1)
-    if end_p == "continues":
-        end_p = chunks[-1]["end"] if chunks else start_p + 30
-
-    relevant_chunks = [
-        c for c in chunks
-        if c["end"] >= start_p - 2 and c["start"] <= end_p + 2
-    ]
-
-    results = []
-    for chunk in relevant_chunks:
-        prompt = EXTRACTION_PROMPT.format(
-            name=comp["name"],
-            comp_type=comp.get("type", "other"),
-            start=chunk["start"],
-            end=chunk["end"],
-            text=chunk["text"][:10000],
-        )
-        for attempt in range(settings.chunk_retries):
-            try:
-                raw = call_claude([{"role": "user", "content": prompt}], max_tokens=4000)
-                raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
-                parsed = json.loads(raw)
-                results.append(parsed)
-                break
-            except Exception as e:
-                print(f"Extraction attempt {attempt+1} failed for {comp['name']}: {e}")
-                time.sleep(settings.chunk_delay_s)
-
-    if not results:
-        return {"component_name": comp["name"], "component_type": comp.get("type"), "sections": {}}
-    return results[0]
 
 # ── Docx assembly ─────────────────────────────────────────────────────────────
 REQUIRED_SECTIONS = ["service_overview", "eligibility_criteria", "fees", "required_documents", "application_steps"]
