@@ -279,17 +279,17 @@ async function callGeminiWithPdf(
   const models = [primaryModel, "google/gemini-2.5-flash"];
   let lastErr: any;
   for (const model of models) {
-    for (let attempt = 0; attempt < 4; attempt++) {
+    // 6 attempts per model: ~2s, 4s, 9s, 18s, 30s, 30s (max) -> ~93s worst-case per model
+    for (let attempt = 0; attempt < 6; attempt++) {
       try {
         return await callGeminiOnce(systemPrompt, userPrompt, pdfB64, model);
       } catch (e: any) {
         lastErr = e;
         const status = e?.status ?? 0;
-        const transient = status === 503 || status === 502 || status === 504 || status === 429 || status === 500;
+        const transient = status === 503 || status === 502 || status === 504 || status === 429 || status === 500 || status === 0;
         console.warn(`Gemini call failed (model=${model}, attempt=${attempt + 1}, status=${status}): ${e?.message?.slice(0, 200)}`);
         if (!transient) break; // non-retriable on this model -> try fallback model
-        // Exponential backoff with jitter: 2s, 5s, 12s, 25s
-        const wait = Math.min(25000, 2000 * Math.pow(2.2, attempt)) + Math.floor(Math.random() * 1000);
+        const wait = Math.min(30000, 2000 * Math.pow(2, attempt)) + Math.floor(Math.random() * 1500);
         await sleep(wait);
       }
     }
@@ -697,17 +697,23 @@ Deno.serve(async (req) => {
               `${userInstr}\n\nNOTE: This is part ${i + 1} of ${chunks.length} of a larger document. ` +
               `These pages correspond to pages ${c.startPage}-${c.endPage} of the original. ` +
               `Use page numbers 1-${c.endPage - c.startPage + 1} within this chunk; the system will offset them.`;
+            // No skipping: every chunk must succeed for the document to be accurate.
+            // callGeminiWithPdf already retries 6x per model across both pro+flash.
+            // If it still fails, abort the job with a clear error so the user can retry.
+            let chunkRes: any;
             try {
-              const chunkRes = await callGeminiWithPdf(sys, chunkInstr, c.b64);
-              const offset = c.startPage - 1;
-              for (const svc of (chunkRes.services ?? [])) {
-                services.push(shiftServicePages(svc, offset));
-              }
+              chunkRes = await callGeminiWithPdf(sys, chunkInstr, c.b64);
             } catch (e: any) {
-              // Don't fail the whole job for one bad chunk — log and continue
-              console.error(`Chunk ${i + 1} failed permanently:`, e?.message);
-              await setStatus(jobId!, "analyzing", prog,
-                `Chunk ${i + 1} skipped (${e?.status ?? "error"}). Continuing…`);
+              throw new Error(
+                `Could not analyze pages ${c.startPage}-${c.endPage} after multiple retries ` +
+                `(${e?.status ?? "error"}: ${e?.message?.slice(0, 200) ?? "unknown"}). ` +
+                `The AI service is temporarily overloaded. Please re-run this job in a few minutes — ` +
+                `no pages will be skipped.`,
+              );
+            }
+            const offset = c.startPage - 1;
+            for (const svc of (chunkRes.services ?? [])) {
+              services.push(shiftServicePages(svc, offset));
             }
             // Small spacing between chunks to be gentle on the gateway
             await sleep(1500);
