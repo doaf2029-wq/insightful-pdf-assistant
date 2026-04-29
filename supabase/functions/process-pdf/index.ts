@@ -697,17 +697,23 @@ Deno.serve(async (req) => {
               `${userInstr}\n\nNOTE: This is part ${i + 1} of ${chunks.length} of a larger document. ` +
               `These pages correspond to pages ${c.startPage}-${c.endPage} of the original. ` +
               `Use page numbers 1-${c.endPage - c.startPage + 1} within this chunk; the system will offset them.`;
+            // No skipping: every chunk must succeed for the document to be accurate.
+            // callGeminiWithPdf already retries 6x per model across both pro+flash.
+            // If it still fails, abort the job with a clear error so the user can retry.
+            let chunkRes: any;
             try {
-              const chunkRes = await callGeminiWithPdf(sys, chunkInstr, c.b64);
-              const offset = c.startPage - 1;
-              for (const svc of (chunkRes.services ?? [])) {
-                services.push(shiftServicePages(svc, offset));
-              }
+              chunkRes = await callGeminiWithPdf(sys, chunkInstr, c.b64);
             } catch (e: any) {
-              // Don't fail the whole job for one bad chunk — log and continue
-              console.error(`Chunk ${i + 1} failed permanently:`, e?.message);
-              await setStatus(jobId!, "analyzing", prog,
-                `Chunk ${i + 1} skipped (${e?.status ?? "error"}). Continuing…`);
+              throw new Error(
+                `Could not analyze pages ${c.startPage}-${c.endPage} after multiple retries ` +
+                `(${e?.status ?? "error"}: ${e?.message?.slice(0, 200) ?? "unknown"}). ` +
+                `The AI service is temporarily overloaded. Please re-run this job in a few minutes — ` +
+                `no pages will be skipped.`,
+              );
+            }
+            const offset = c.startPage - 1;
+            for (const svc of (chunkRes.services ?? [])) {
+              services.push(shiftServicePages(svc, offset));
             }
             // Small spacing between chunks to be gentle on the gateway
             await sleep(1500);
