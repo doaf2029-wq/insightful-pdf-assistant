@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import { ArrowLeft, Download, FileText } from "lucide-react";
+import { AlertTriangle, ArrowLeft, Download, FileText } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/providers/AuthProvider";
@@ -23,8 +23,21 @@ type Job = {
   zip_path: string | null;
   language: string;
   prompt: string | null;
+  component_count: number | null;
+  manifest_conflicts: any | null;
+  failed_chunks: any | null;
+  label_mappings: any | null;
 };
-type ServiceOutput = { id: string; title: string; title_ar: string | null; docx_path: string; order_index: number };
+type ServiceOutput = {
+  id: string;
+  title: string;
+  title_ar: string | null;
+  docx_path: string;
+  order_index: number;
+  component_type: string | null;
+  validation_status: string | null;
+  missing_sections: string[] | null;
+};
 
 const JobDetail = () => {
   const { id } = useParams();
@@ -53,7 +66,7 @@ const JobDetail = () => {
     const loadOutputs = async () => {
       const { data } = await supabase
         .from("service_outputs")
-        .select("id,title,title_ar,docx_path,order_index")
+        .select("id,title,title_ar,docx_path,order_index,component_type,validation_status,missing_sections")
         .eq("job_id", id)
         .order("order_index", { ascending: true });
       if (active) setOutputs((data as ServiceOutput[]) ?? []);
@@ -126,6 +139,25 @@ const JobDetail = () => {
 
         <JobProgress job={job} />
 
+        {(job.manifest_conflicts || job.failed_chunks) && (
+          <Card className="p-4 border-amber-300 bg-amber-50 dark:bg-amber-950/20 space-y-2">
+            <div className="flex items-center gap-2 text-amber-700 dark:text-amber-400 font-medium text-sm">
+              <AlertTriangle className="w-4 h-4" />
+              Review needed
+            </div>
+            {job.manifest_conflicts && (
+              <div className="text-xs text-foreground/80">
+                Discovery conflicts: <span className="font-mono">{Array.isArray(job.manifest_conflicts) ? job.manifest_conflicts.length : Object.keys(job.manifest_conflicts).length}</span> resolved by tiebreaker.
+              </div>
+            )}
+            {job.failed_chunks && Array.isArray(job.failed_chunks) && job.failed_chunks.length > 0 && (
+              <div className="text-xs text-foreground/80">
+                Failed chunks (skipped after retries): <span className="font-mono">{job.failed_chunks.length}</span>
+              </div>
+            )}
+          </Card>
+        )}
+
         {job.status === "completed" && job.zip_path && (
           <Button
             size="lg"
@@ -146,10 +178,27 @@ const JobDetail = () => {
                   <FileText className="w-4 h-4 text-primary" />
                 </div>
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium text-sm text-foreground truncate">{o.title}</div>
+                  <div className="font-medium text-sm text-foreground truncate flex items-center gap-2">
+                    {o.title}
+                    {o.component_type && o.component_type !== "service" && (
+                      <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-muted text-muted-foreground">
+                        {o.component_type}
+                      </span>
+                    )}
+                    {o.validation_status === "incomplete" && (
+                      <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+                        incomplete
+                      </span>
+                    )}
+                  </div>
                   {o.title_ar && (
                     <div className="text-xs text-muted-foreground font-arabic truncate" dir="rtl">
                       {o.title_ar}
+                    </div>
+                  )}
+                  {o.missing_sections && o.missing_sections.length > 0 && (
+                    <div className="text-[11px] text-amber-700 dark:text-amber-400 mt-0.5 truncate">
+                      Missing: {o.missing_sections.join(", ")}
                     </div>
                   )}
                 </div>
