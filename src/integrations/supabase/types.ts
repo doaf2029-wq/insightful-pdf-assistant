@@ -16,11 +16,15 @@ export type Database = {
     Tables: {
       jobs: {
         Row: {
+          component_count: number | null
           created_at: string
           error_message: string | null
+          failed_chunks: Json | null
           filename: string
           id: string
+          label_mappings: Json | null
           language: string
+          manifest_conflicts: Json | null
           page_count: number | null
           pdf_path: string
           progress: number
@@ -30,14 +34,19 @@ export type Database = {
           status_message: string | null
           updated_at: string
           user_id: string
+          worker_run_id: string | null
           zip_path: string | null
         }
         Insert: {
+          component_count?: number | null
           created_at?: string
           error_message?: string | null
+          failed_chunks?: Json | null
           filename: string
           id?: string
+          label_mappings?: Json | null
           language?: string
+          manifest_conflicts?: Json | null
           page_count?: number | null
           pdf_path: string
           progress?: number
@@ -47,14 +56,19 @@ export type Database = {
           status_message?: string | null
           updated_at?: string
           user_id: string
+          worker_run_id?: string | null
           zip_path?: string | null
         }
         Update: {
+          component_count?: number | null
           created_at?: string
           error_message?: string | null
+          failed_chunks?: Json | null
           filename?: string
           id?: string
+          label_mappings?: Json | null
           language?: string
+          manifest_conflicts?: Json | null
           page_count?: number | null
           pdf_path?: string
           progress?: number
@@ -64,6 +78,7 @@ export type Database = {
           status_message?: string | null
           updated_at?: string
           user_id?: string
+          worker_run_id?: string | null
           zip_path?: string | null
         }
         Relationships: []
@@ -88,37 +103,46 @@ export type Database = {
       }
       service_outputs: {
         Row: {
+          component_type: string | null
           created_at: string
           docx_path: string
           id: string
           job_id: string
           language: string | null
+          missing_sections: Json | null
           order_index: number
           title: string
           title_ar: string | null
           user_id: string
+          validation_status: string | null
         }
         Insert: {
+          component_type?: string | null
           created_at?: string
           docx_path: string
           id?: string
           job_id: string
           language?: string | null
+          missing_sections?: Json | null
           order_index?: number
           title: string
           title_ar?: string | null
           user_id: string
+          validation_status?: string | null
         }
         Update: {
+          component_type?: string | null
           created_at?: string
           docx_path?: string
           id?: string
           job_id?: string
           language?: string | null
+          missing_sections?: Json | null
           order_index?: number
           title?: string
           title_ar?: string | null
           user_id?: string
+          validation_status?: string | null
         }
         Relationships: [
           {
