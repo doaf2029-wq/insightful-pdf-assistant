@@ -640,7 +640,19 @@ Deno.serve(async (req) => {
         const pdfBytes = new Uint8Array(await pdfBlob.arrayBuffer());
         const pdfB64 = bytesToBase64(pdfBytes);
 
-        await setStatus(jobId!, "analyzing", 30, "Sending to AI for analysis (may take a few minutes for large PDFs)…");
+        // Determine page count up-front so we can decide whether to chunk
+        let totalPages = 0;
+        try {
+          const probe = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+          totalPages = probe.getPageCount();
+        } catch (e) {
+          console.warn("Could not probe PDF page count:", (e as any)?.message);
+        }
+
+        await setStatus(jobId!, "analyzing", 25,
+          totalPages > 0
+            ? `Analyzing ${totalPages}-page PDF with AI…`
+            : "Sending to AI for analysis…");
 
         const userInstr = job.prompt
           ? `User instructions: ${job.prompt}\n\nNow analyze the attached PDF.`
@@ -664,9 +676,46 @@ Deno.serve(async (req) => {
           langInstr,
         ].join("\n");
 
-        const result = await callGeminiWithPdf(sys, userInstr, pdfB64);
-        const services = (result.services ?? []) as any[];
-        if (!services.length) throw new Error("AI did not identify any services");
+        // Chunk large PDFs to avoid 503s and context overflows.
+        // ~40 pages per chunk keeps each request small and reliable.
+        const PAGES_PER_CHUNK = 40;
+        const shouldChunk = totalPages > PAGES_PER_CHUNK;
+
+        let services: any[] = [];
+        if (!shouldChunk) {
+          const result = await callGeminiWithPdf(sys, userInstr, pdfB64);
+          services = (result.services ?? []) as any[];
+        } else {
+          const chunks = await splitPdfIntoChunks(pdfBytes, PAGES_PER_CHUNK);
+          console.log(`Split PDF into ${chunks.length} chunks of up to ${PAGES_PER_CHUNK} pages`);
+          for (let i = 0; i < chunks.length; i++) {
+            const c = chunks[i];
+            const prog = 25 + Math.floor((i / chunks.length) * 30);
+            await setStatus(jobId!, "analyzing", prog,
+              `Analyzing pages ${c.startPage}-${c.endPage} of ${totalPages} (chunk ${i + 1}/${chunks.length})…`);
+            const chunkInstr =
+              `${userInstr}\n\nNOTE: This is part ${i + 1} of ${chunks.length} of a larger document. ` +
+              `These pages correspond to pages ${c.startPage}-${c.endPage} of the original. ` +
+              `Use page numbers 1-${c.endPage - c.startPage + 1} within this chunk; the system will offset them.`;
+            try {
+              const chunkRes = await callGeminiWithPdf(sys, chunkInstr, c.b64);
+              const offset = c.startPage - 1;
+              for (const svc of (chunkRes.services ?? [])) {
+                services.push(shiftServicePages(svc, offset));
+              }
+            } catch (e: any) {
+              // Don't fail the whole job for one bad chunk — log and continue
+              console.error(`Chunk ${i + 1} failed permanently:`, e?.message);
+              await setStatus(jobId!, "analyzing", prog,
+                `Chunk ${i + 1} skipped (${e?.status ?? "error"}). Continuing…`);
+            }
+            // Small spacing between chunks to be gentle on the gateway
+            await sleep(1500);
+          }
+          services = mergeServices(services);
+        }
+
+        if (!services.length) throw new Error("AI did not identify any services in the document");
 
         // page_count is best-effort from end_page max
         const maxPage = services.reduce((m, s) => Math.max(m, s.end_page || 0), 0) || null;
