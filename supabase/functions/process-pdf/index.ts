@@ -7,6 +7,7 @@ import {
 } from "npm:docx@8.5.0";
 import JSZip from "npm:jszip@3.10.1";
 import { getDocumentProxy, renderPageAsImage } from "npm:unpdf@0.12.1";
+import { PDFDocument } from "npm:pdf-lib@1.17.1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -222,7 +223,14 @@ const SERVICE_SCHEMA = {
   required: ["services"],
 };
 
-async function callGeminiWithPdf(systemPrompt: string, userPrompt: string, pdfB64: string, model = "google/gemini-2.5-pro") {
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function callGeminiOnce(
+  systemPrompt: string,
+  userPrompt: string,
+  pdfB64: string,
+  model: string,
+) {
   const resp = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
     method: "POST",
     headers: { Authorization: `Bearer ${LOVABLE_API_KEY}`, "Content-Type": "application/json" },
@@ -251,12 +259,104 @@ async function callGeminiWithPdf(systemPrompt: string, userPrompt: string, pdfB6
   });
   if (!resp.ok) {
     const t = await resp.text();
-    throw new Error(`AI gateway ${resp.status}: ${t.slice(0, 500)}`);
+    const err: any = new Error(`AI gateway ${resp.status}: ${t.slice(0, 300)}`);
+    err.status = resp.status;
+    throw err;
   }
   const data = await resp.json();
   const tc = data.choices?.[0]?.message?.tool_calls?.[0];
   if (!tc) throw new Error("AI returned no tool call");
   return JSON.parse(tc.function.arguments);
+}
+
+/** Call Gemini with retries (handles 503/429/5xx) and a flash fallback. */
+async function callGeminiWithPdf(
+  systemPrompt: string,
+  userPrompt: string,
+  pdfB64: string,
+  primaryModel = "google/gemini-2.5-pro",
+) {
+  const models = [primaryModel, "google/gemini-2.5-flash"];
+  let lastErr: any;
+  for (const model of models) {
+    for (let attempt = 0; attempt < 4; attempt++) {
+      try {
+        return await callGeminiOnce(systemPrompt, userPrompt, pdfB64, model);
+      } catch (e: any) {
+        lastErr = e;
+        const status = e?.status ?? 0;
+        const transient = status === 503 || status === 502 || status === 504 || status === 429 || status === 500;
+        console.warn(`Gemini call failed (model=${model}, attempt=${attempt + 1}, status=${status}): ${e?.message?.slice(0, 200)}`);
+        if (!transient) break; // non-retriable on this model -> try fallback model
+        // Exponential backoff with jitter: 2s, 5s, 12s, 25s
+        const wait = Math.min(25000, 2000 * Math.pow(2.2, attempt)) + Math.floor(Math.random() * 1000);
+        await sleep(wait);
+      }
+    }
+  }
+  throw lastErr ?? new Error("AI gateway failed after retries");
+}
+
+/** Split a PDF into page-range chunks. Returns base64 chunks + their page offsets (1-based start page in the original). */
+async function splitPdfIntoChunks(
+  pdfBytes: Uint8Array,
+  pagesPerChunk: number,
+): Promise<{ b64: string; startPage: number; endPage: number }[]> {
+  const src = await PDFDocument.load(pdfBytes, { ignoreEncryption: true });
+  const total = src.getPageCount();
+  const chunks: { b64: string; startPage: number; endPage: number }[] = [];
+  for (let start = 0; start < total; start += pagesPerChunk) {
+    const end = Math.min(total, start + pagesPerChunk);
+    const out = await PDFDocument.create();
+    const indices = Array.from({ length: end - start }, (_, i) => start + i);
+    const copied = await out.copyPages(src, indices);
+    for (const p of copied) out.addPage(p);
+    const bytes = await out.save({ useObjectStreams: true });
+    chunks.push({
+      b64: bytesToBase64(new Uint8Array(bytes)),
+      startPage: start + 1,
+      endPage: end,
+    });
+  }
+  return chunks;
+}
+
+/** Shift page references in a service's steps & figures so they map to the original PDF. */
+function shiftServicePages(svc: any, offset: number) {
+  if (typeof svc.start_page === "number") svc.start_page += offset;
+  if (typeof svc.end_page === "number") svc.end_page += offset;
+  for (const s of svc.steps ?? []) {
+    if (typeof s.page_ref === "number") s.page_ref += offset;
+  }
+  for (const f of svc.important_figures ?? []) {
+    if (typeof f.page_ref === "number") f.page_ref += offset;
+  }
+  return svc;
+}
+
+/** Merge services from multiple chunks: dedupe by similar title (keep richer one). */
+function mergeServices(all: any[]): any[] {
+  const out: any[] = [];
+  const seen = new Map<string, number>();
+  const norm = (s: string) =>
+    (s ?? "").toLowerCase().replace(/[^a-z0-9\u0600-\u06FF]+/g, " ").trim().slice(0, 80);
+  for (const svc of all) {
+    const key = norm(svc.title_en || svc.title_ar || "");
+    if (!key) { out.push(svc); continue; }
+    if (seen.has(key)) {
+      const idx = seen.get(key)!;
+      const existing = out[idx];
+      // Keep the one with more content
+      const score = (s: any) =>
+        (s.steps?.length || 0) * 3 + (s.eligibility_en?.length || 0) +
+        (s.documents_en?.length || 0) + (s.overview_en?.length ? 1 : 0);
+      if (score(svc) > score(existing)) out[idx] = svc;
+    } else {
+      seen.set(key, out.length);
+      out.push(svc);
+    }
+  }
+  return out;
 }
 
 /* -------------------- DOCX generation -------------------- */
